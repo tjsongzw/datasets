@@ -45,7 +45,7 @@ def _shuffle(store):
 
 
 def shuffle_list(lst):
-    """Shuffle _lst_ 
+    """Shuffle _lst_
     """
     n = len(lst)
     for i in xrange(n):
@@ -62,7 +62,7 @@ def _scale_01(arr, eps=1e-10):
     """
     newarr = arr.copy()
     mn = newarr.min()
-    newarr -= mn 
+    newarr -= mn
     mx = newarr.max()
     newarr *= 1.0/(mx + eps)
     return newarr
@@ -83,20 +83,20 @@ def visualize(array, rsz, shape_r=None, xtiles=None, fill=0):
     """
     sz = array.size
     fields = array.reshape(sz/rsz, rsz)
-    
+
     # tiles per axes
     xtiles = xtiles if xtiles else int(np.sqrt(sz/rsz))
     ytiles = int(np.ceil(sz/rsz/(1.*xtiles)))
     if shape_r is None:
         shape_r = int(np.sqrt(rsz))
     shape_c = int(rsz/shape_r)
-    
+
     # take care of extra pixels for borders
     pixelsy = ytiles * shape_r + ytiles + 1
     pixelsx = xtiles * shape_c + xtiles + 1
     # the tiling has this shape and _fill_ background
     tiling = fill*np.ones((pixelsy, pixelsx), dtype = 'uint8')
-    
+
     for row in xrange(ytiles):
         for col in xrange(xtiles):
             if (col+row*xtiles) < fields.shape[0]:
@@ -151,7 +151,7 @@ def pca(data, covered=None, whiten=False, chunk=512, **schedule):
     for i in xrange(0, n, chunk):
         tmp = np.array(data[i:i+chunk])
         cov += np.dot(tmp.T, tmp)
-    cov /= n 
+    cov /= n
     u, s, v = la.svd(cov, full_matrices=False)
     if covered is None:
         retained = d
@@ -176,7 +176,7 @@ def zca(data, eps=1e-5, chunk=512, **schedule):
     for i in xrange(0, n, chunk):
         tmp = np.array(data[i:i+chunk])
         cov += np.dot(tmp.T, tmp)
-    cov /= n 
+    cov /= n
     u, s, v = la.svd(cov, full_matrices=False)
     comp = np.dot(np.dot(u, np.diag(1./np.sqrt(s + eps))), u.T)
     return comp, s
@@ -480,7 +480,7 @@ def _zeroone(store, key, new, pars):
     """Zero/One normalization.
     """
     chunk = pars
-    shape = store[key].shape 
+    shape = store[key].shape
     dset = new.create_dataset(name=key, shape=shape, dtype=store[key].dtype)
     mn = np.inf
     mx = -np.inf
@@ -495,7 +495,7 @@ def _zeroone(store, key, new, pars):
     diff = mx-mn
     for i in xrange(0, shape[0], chunk):
         dset[i:i+chunk] = (store[key][i:i+chunk] - mn)/diff
- 
+
     for attrs in store[key].attrs:
         dset.attrs[attrs] = store[key].attrs[attrs]
     dset.attrs['ZeroOne MinMax'] = (mn, mx)
@@ -540,7 +540,7 @@ def _zeroone_group(store, new, pars):
 
 
 def _at(store, key, new, pars):
-    """Apply affine transformation (at) to 
+    """Apply affine transformation (at) to
     _store[key]_ members and build dataset in _new_.
     """
     chunk, M = pars[0], pars[1]
@@ -550,7 +550,7 @@ def _at(store, key, new, pars):
 
     for i in xrange(0, n, chunk):
         dset[i:i+chunk] = np.dot(store[key][i:i+chunk], M)
- 
+
     for attrs in store[key].attrs:
         dset.attrs[attrs] = store[key].attrs[attrs]
     dset.attrs['Affine shape'] = M.shape[1]
@@ -561,7 +561,7 @@ def _at(store, key, new, pars):
 
 
 def _fward(store, key, new, pars):
-    """Apply fward function to 
+    """Apply fward function to
     _store[key]_ members and build dataset in _new_.
     """
     chunk, fward, D = pars[0], pars[1], pars[2]
@@ -571,7 +571,7 @@ def _fward(store, key, new, pars):
 
     for i in xrange(0, n, chunk):
         dset[i:i+chunk] = fward(store[key][i:i+chunk])
- 
+
     for attrs in store[key].attrs:
         dset.attrs[attrs] = store[key].attrs[attrs]
     dset.attrs['fward'] = str(fward)
@@ -609,7 +609,7 @@ def _stationary(store, key, new, pars):
     _store_ has to be an np.array. Works __inplace__.
     """
     chunk, eps, C, div = pars[0], pars[1], pars[2], pars[3]
-    
+
     dset = new.create_dataset(name=key, shape=store[key].shape, dtype=store[key].dtype)
 
     for i in xrange(0, store[key].shape[0], chunk):
@@ -634,7 +634,7 @@ def _divisive(store, key, new, pars):
     _store_ has to behave like an np.array. Works __inplace__.
     """
     chunk, eps, C = pars[0], pars[1], pars[2]
-    
+
     dset = new.create_dataset(name=key, shape=store[key].shape, dtype=store[key].dtype)
 
     for i in xrange(0, store[key].shape[0], chunk):
@@ -652,7 +652,7 @@ def _divisive(store, key, new, pars):
 
 
 def _row0(store, key, new, chunk=512):
-    """Subtract row-mean 
+    """Subtract row-mean
     """
     dset = new.create_dataset(name=key, shape=store[key].shape, dtype=store[key].dtype)
 
@@ -726,3 +726,25 @@ def _floatify(store, key, float_store, pars):
 
     for attrs in store[key].attrs:
         dset.attrs[attrs] = store[key].attrs[attrs]
+
+
+def convert_spatial_dataset(store, key, new, spatial_n):
+    """
+    _spatial_n_ is the number of sub spatial, >= 2
+    convert a spatial dataset to a non-spatial dataset
+    """
+    shape = store[key].shape
+    new_shape = (shape[0], shape[1]/spatial_n)
+    chunk = 512
+    dset = new.create_dataset(name=key, shape=new_shape, dtype=store[key].dtype)
+    for i in xrange(0, shape[0], chunk):
+        value = store[key][i:i+chunk, :new_shape[1]]
+        for k in xrange(spatial_n-1):
+            value += store[key][i:i+chunk, new_shape[1]*(k+1):new_shape[1]*(k+2)]
+        dset[i:i+chunk] = value
+
+    for attrs in store[key].attrs:
+        dset.attrs[attrs] = store[key].attrs[attrs]
+
+    for attrs in store.attrs:
+        new.attrs[attrs] = store.attrs[attrs]

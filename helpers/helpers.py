@@ -297,6 +297,15 @@ def row0(store, new, chunk=512, exclude=[None]):
     apply_to_store(store, new, _row0, pars, exclude=exclude)
 
 
+def row0_1(store, new, chunk=512, tol=0., eps=1e-8, exclude=[None]):
+    '''Generate a new store _new_ from _store_ with
+    zero mean and unit variance by each row,
+    while with a tolerance _tol_ that all std larger than.
+    '''
+    pars = (chunk, tol, eps)
+    apply_to_store(store, new, _row0_1, pars, exclude=exclude)
+
+
 def at(store, new, M, chunk=512, exclude=[None]):
     """Affine Transformation
     """
@@ -398,6 +407,13 @@ def feat_div(store, new, chunk, div, exclude=[None]):
     """
     pars = (chunk, div)
     apply_to_store(store, new, _feat_div, pars, exclude=exclude)
+
+
+def binary(store, new, chunk=512, exclude=[None]):
+    """to binary
+    """
+    pars = chunk
+    apply_to_store(store, new, _binary, pars, exclude=exclude)
 
 
 def global_div(store, new, chunk, div, exclude=[None]):
@@ -667,6 +683,35 @@ def _row0(store, key, new, chunk=512):
         new.attrs[attrs] = store.attrs[attrs]
 
 
+def _row0_1(store, key, new, pars):
+    '''
+    subtract row-mean, divided by std, with std > threshold(_tol_)
+    '''
+    chunk, tol, eps = pars[0], pars[1], pars[2]
+    data_dim = store[key].shape[1]
+    dset = new.create_dataset(name=key, shape=(0, data_dim), dtype=float,
+                              compression='gzip', maxshape=(None, data_dim))
+
+    for i in xrange(0, store[key].shape[0], chunk):
+        means = np.mean(store[key][i:i+chunk], axis=1)
+        data = store[key][i:i+chunk] - np.atleast_2d(means).T
+        std = np.std(store[key][i:i+chunk], axis=1) + eps
+        data /= np.atleast_2d(std).T
+        go = data[np.where(std > tol)[0]]
+        append_size = go.shape[0]
+        current_size = dset.shape[0]
+        dset.resize((current_size + append_size, data_dim))
+        dset[current_size:current_size + append_size] = go
+
+    for attrs in store[key].attrs:
+        dset.attrs[attrs] = store[key].attrs[attrs]
+    dset.attrs['std_tol'] = tol
+
+    for attrs in store.attrs:
+        new.attrs[attrs] = store.attrs[attrs]
+    new.attrs['std_tol'] = tol
+
+
 def _resize(store, key, new, shape):
     """
     """
@@ -726,6 +771,23 @@ def _floatify(store, key, float_store, pars):
 
     for attrs in store[key].attrs:
         dset.attrs[attrs] = store[key].attrs[attrs]
+
+
+def _binary(store, key, new, chunk=512):
+    """convert to binary
+    """
+    dset = new.create_dataset(name=key, shape=store[key].shape,
+                              dtype=store[key].dtype,
+                              compression='gzip')
+
+    for i in xrange(0, store[key].shape[0], chunk):
+        dset[i:i+chunk] = store[key][i:i+chunk] > 0
+
+    for attrs in store[key].attrs:
+        dset.attrs[attrs] = store[key].attrs[attrs]
+
+    for attrs in store.attrs:
+        new.attrs[attrs] = store.attrs[attrs]
 
 
 def convert_spatial_dataset(store, key, new, spatial_n):

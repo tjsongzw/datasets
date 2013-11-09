@@ -8,6 +8,7 @@ import numpy as np
 import scipy.linalg as la
 import h5py
 from time import strftime
+from numpy.lib.stride_tricks import as_strided as ast
 
 
 try:
@@ -423,6 +424,18 @@ def global_div(store, new, chunk, div, exclude=[None]):
     apply_to_store(store, new, _global_div, pars, exclude=exclude)
 
 
+def blockify(store, new, xs, block, chunk=512, exclude=[None]):
+    '''
+    2D case
+    block view with flatten of data
+    _xs_(tuple) is the original 2D shape of a data sample
+    _block_(tuple) is the block size needed(not the shape of each block)
+    in row-wise view
+    '''
+    pars = (chunk, xs, block)
+    apply_to_store(store, new, _blockify, pars, exclude=exclude)
+
+
 def _binary_inv(store, key, new, chunk):
     """
     """
@@ -689,8 +702,8 @@ def _row0_1(store, key, new, pars):
     '''
     chunk, tol, eps = pars[0], pars[1], pars[2]
     data_dim = store[key].shape[1]
-    dset = new.create_dataset(name=key, shape=(0, data_dim), dtype=float,
-                              compression='gzip', maxshape=(None, data_dim))
+    dset = new.create_dataset(name=key, shape=(0, data_dim), compression='gzip',
+                              dtype=np.float, maxshape=(None, data_dim))
 
     for i in xrange(0, store[key].shape[0], chunk):
         means = np.mean(store[key][i:i+chunk], axis=1)
@@ -788,6 +801,98 @@ def _binary(store, key, new, chunk=512):
 
     for attrs in store.attrs:
         new.attrs[attrs] = store.attrs[attrs]
+
+
+def _blockify(store, key, new, pars):
+    '''
+    '''
+    chunk, xs, block = pars[0], pars[1], pars[2]
+    dset = new.create_dataset(name=key, shape=store[key].shape, dtype=store[key].dtype)
+
+    for i in xrange(0, store[key].shape[0], chunk):
+        dset[i:i+chunk] = _batch_block_view(store[key][i:i+chunk], xs, block)
+
+    for attrs in store[key].attrs:
+        dset.attrs[attrs] = store[key].attrs[attrs]
+    dset.attrs["block_size"] = block
+
+    for attrs in store.attrs:
+        new.attrs[attrs] = store.attrs[attrs]
+    new.attrs["block_size"] = block
+
+
+def _batch_block_view(X, x_shape, block, func=lambda x:x):
+    # from numpy.lib.stride_tricks import as_strided as ast
+    '''
+    convert each row of _X_ to block viewed
+    _X_.shape[0], data sample size
+    _X_.shape[1], data dimension
+    _block_ size must be strictly compatible with _X_.shape[1]
+    '''
+    assert x_shape[0] % block[0] == 0, '0 dim mismatching'
+    assert x_shape[1] % block[1] == 0, '1 dim mismatching'
+    block_shape = (x_shape[0] / block[0], x_shape[1] / block[1])
+    _X = np.atleast_2d(X)
+    block_X = np.empty((0, X.shape[1]))
+    for _x in _X:
+        _block_x = _row_block_view(_x, x_shape, block, block_shape, func=func)
+        block_X = np.concatenate((block_X, _block_x))
+    return block_X
+
+
+def _batch_unblock_view(X, x_shape, block):
+    # from numpy.lib.stride_tricks import as_strided as ast
+    '''
+    do reverse from block view to original view
+    x_shape, original 2d topo
+    '''
+    assert x_shape[0] % block[0] == 0, '0 dim mismatching'
+    assert x_shape[1] % block[1] == 0, '1 dim mismatching'
+    block_shape = (x_shape[0] / block[0], x_shape[1] / block[1])
+    _X = np.atleast_2d(X)
+    unblock_X = np.empty((0, X.shape[1]))
+    for _x in _X:
+        _unblock_x = _unrow_block_view(_x, x_shape, block, block_shape)
+        unblock_X = np.concatenate((unblock_X, _unblock_x))
+    return unblock_X
+
+
+def _row_block_view(rx, x_shape, block, block_shape, func=lambda x:x):
+    '''
+    2D case
+    single row block view, return the row form of it
+    and with func apply to each block
+    _block_shape_.shape must have a strictly matching with _rx_.shape
+    that means, each dimension of _rx_ could be divisible by
+    corresponding dim of _block_shape_
+    '''
+    x = rx.reshape(x_shape)
+    shape = (x.shape[0]/block_shape[0], x.shape[1]/block_shape[1]) + block_shape
+    strides= (block_shape[0]*x.strides[0], block_shape[1]*x.strides[1]) + x.strides
+    block_x = ast(x, shape=shape, strides=strides)
+    l = []
+    for i in xrange(block[0]):
+        for j in xrange(block[1]):
+            l.append(func(block_x[i][j]).ravel())
+            # block_rx = np.concatenate((block_rx, func(block_x[i][j]).ravel()), axis=1)
+    return np.concatenate(l, axis=1).reshape(1, -1)
+
+
+def _unrow_block_view(brx, x_shape, block, block_shape):
+    '''
+    roll back to original flattened view
+    _brx_, block view of x(1d array)
+    '''
+    x = brx.reshape(block[0]*block[1], -1)
+    r_brx = np.empty(x_shape) #reverse brx
+    b_idx = 0
+    for i in range(block[0]):
+        for j in range(block[1]):
+            b_x = x[b_idx]
+            r_brx[i*block_shape[0]:(i+1)*block_shape[1],
+                  j*block_shape[0]:(j+1)*block_shape[1]] = b_x.reshape(block_shape)
+            b_idx += 1
+    return r_brx.reshape(1, -1)
 
 
 def convert_spatial_dataset(store, key, new, spatial_n):

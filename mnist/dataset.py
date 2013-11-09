@@ -1,13 +1,19 @@
 import h5py
 import cPickle
 import gzip
-from os.path import dirname, join
+from os.path import dirname, join, isfile
+from helpers import helpers
+import numpy as np
 
 
-_default_name = join(dirname(__file__), "mnist.h5")
+# _default_name = join(dirname(__file__), "mnist.h5")
+# _default_block_name = join(dirname(__file__), "mnist_spatial.h5")
 
+_default_name = join("mnist.h5")
+_default_block_name = join("mnist_spatial.h5")
 
 def get_store(fname=_default_name):
+    fname = join(dirname(__file__), fname)
     print "Loading from store", fname
     return h5py.File(fname, 'r')
 
@@ -42,5 +48,45 @@ def build_store(store="mnist.h5", mnist="mnist.pkl.gz"):
     h5file.close()
 
 
+def build_block_store(block, store="mnist.h5", block_store="mnist_spatial.h5"):
+    '''
+    Build a hdf5 data store with block view form for MNIST
+    '''
+    xs = (28, 28)
+    helpers.blockify(h5py.File(store, 'r'),
+                     h5py.File(block_store, 'w'),
+                     xs, block, exclude=['targets'])
+
+
+def visualize():
+    if isfile(_default_name):
+        f = get_store()
+        data = f['train']['inputs']
+        mat = data[:128]
+        rmat = np.ravel(mat.astype(float))
+        im = helpers.visualize(rmat, 28*28)
+        im.save('mnist.png')
+
+
+def visualize_bv(block):
+    '''
+    visualize the block view data
+    '''
+    if isfile(_default_block_name):
+        f = get_store(fname=_default_block_name)
+        data = f['train']['inputs']
+        block_mat = data[:128]
+        mat = helpers._batch_unblock_view(block_mat, (28, 28), block)
+        rmat = np.ravel(mat.astype(float))
+        im = helpers.visualize(rmat, 28*28)
+        im.save('mnist_block.png')
+
 if __name__=="__main__":
-    build_store()
+    if isfile(_default_name):
+        print _default_name, 'exists'
+    else:
+        build_store()
+    # visualize()
+    bs = (4, 4)
+    # build_block_store(bs)
+    visualize_bv(bs)

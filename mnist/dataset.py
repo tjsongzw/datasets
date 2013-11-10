@@ -48,7 +48,7 @@ def build_store(store="mnist.h5", mnist="mnist.pkl.gz"):
     h5file.close()
 
 
-def build_block_store(block, store="mnist.h5", block_store="mnist_spatial.h5"):
+def build_block_store(block, block_store, store="mnist.h5"):
     '''
     Build a hdf5 data store with block view form for MNIST
     '''
@@ -68,12 +68,12 @@ def visualize():
         im.save('mnist.png')
 
 
-def visualize_bv(block):
+def visualize_bv(block, block_file):
     '''
     visualize the block view data
     '''
-    if isfile(_default_block_name):
-        f = get_store(fname=_default_block_name)
+    if isfile(block_file):
+        f = get_store(fname=block_file)
         data = f['train']['inputs']
         block_mat = data[:128]
         mat = helpers._batch_unblock_view(block_mat, (28, 28), block)
@@ -87,6 +87,7 @@ if __name__=="__main__":
     else:
         build_store()
     # visualize()
-    bs = (4, 4)
-    # build_block_store(bs)
-    visualize_bv(bs)
+    bs = (4, 1)
+    b_store = 'mnist_spatial_{}x{}.h5'.format(bs[0], bs[1])
+    build_block_store(bs, b_store)
+    # visualize_bv(bs, b_store)

@@ -852,7 +852,7 @@ def _batch_unblock_view(X, x_shape, block):
     _X = np.atleast_2d(X)
     unblock_X = np.empty((0, X.shape[1]))
     for _x in _X:
-        _unblock_x = _unrow_block_view(_x, x_shape, block, block_shape)
+        _unblock_x = _row_unblock_view(_x, x_shape, block, block_shape)
         unblock_X = np.concatenate((unblock_X, _unblock_x))
     return unblock_X
 
@@ -878,7 +878,7 @@ def _row_block_view(rx, x_shape, block, block_shape, func=lambda x:x):
     return np.concatenate(l, axis=1).reshape(1, -1)
 
 
-def _unrow_block_view(brx, x_shape, block, block_shape):
+def _row_unblock_view(brx, x_shape, block, block_shape):
     '''
     roll back to original flattened view
     _brx_, block view of x(1d array)
@@ -889,8 +889,8 @@ def _unrow_block_view(brx, x_shape, block, block_shape):
     for i in range(block[0]):
         for j in range(block[1]):
             b_x = x[b_idx]
-            r_brx[i*block_shape[0]:(i+1)*block_shape[1],
-                  j*block_shape[0]:(j+1)*block_shape[1]] = b_x.reshape(block_shape)
+            r_brx[i*block_shape[0]:(i+1)*block_shape[0],
+                  j*block_shape[1]:(j+1)*block_shape[1]] = b_x.reshape(block_shape)
             b_idx += 1
     return r_brx.reshape(1, -1)
 

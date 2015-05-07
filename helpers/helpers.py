@@ -10,7 +10,6 @@ import h5py
 from time import strftime
 from numpy.lib.stride_tricks import as_strided as ast
 
-
 try:
     import Image as img
 except:
@@ -30,7 +29,6 @@ def shuffle(store):
             print "...", store, key
             _shuffle(store[key])
 
-
 def _shuffle(store):
     """Shuffle rows inplace.
     _store_ has to behave like
@@ -43,6 +41,42 @@ def _shuffle(store):
         tmp = store[idx].copy()
         store[idx] = store[i].copy()
         store[i] = tmp
+
+
+def _shuffle_pairs(store):
+    """Shuffle rows pairwise inplace.
+    _store_ has to behave like
+    an numpy.array.
+    """
+    N, _ = store.shape
+    for i in xrange(N//2):
+        interval = N//2 - i
+        idx = i + np.random.randint(interval)
+        tmp1 = store[2*idx].copy()
+        tmp2 = store[2*idx+1].copy()
+        store[2*idx] = store[2*i].copy()
+        store[2*idx+1] = store[2*i+1].copy()
+        store[2*i] = tmp1
+        store[2*i+1] = tmp2
+
+
+def _shuffle_sync(store1, store2):
+    """Shuffle rows inplace, the same way in both stores.
+    _store1_ and _store2_ has to behave like
+    an numpy.array.
+    """
+    N, _ = store1.shape
+    assert N == store2.shape[0], "Stores need to be same length."
+    for i in xrange(N):
+        interval = N - i
+        idx = i + np.random.randint(interval)
+        tmp = store1[idx].copy()
+        store1[idx] = store1[i].copy()
+        store1[i] = tmp
+        # do same thing on store2, too
+        tmp = store2[idx].copy()
+        store2[idx] = store2[i].copy()
+        store2[i] = tmp
 
 
 def shuffle_list(lst):
@@ -197,8 +231,7 @@ def apply_to_group(store, new, method, pars, group):
     """
     for key in store.keys():
         if key in group:
-            method(store, new, pars)
-            return
+            method(store, key, new, pars)
         else:
             if type(store[key]) is h5py.Group:
                 grp = new.create_group(name=key)
@@ -207,6 +240,8 @@ def apply_to_group(store, new, method, pars, group):
                     new.attrs[attrs] = store.attrs[attrs]
                 for attrs in grp.attrs.keys():
                     new.attrs[attrs] = grp.attrs[attrs]
+            elif type(store[key]) is h5py.Dataset:
+                    clone_dataset(store, key, new)
 
 
 def apply_to_store(store, new, method, pars, exclude=[None]):
@@ -232,6 +267,18 @@ def apply_to_store(store, new, method, pars, exclude=[None]):
                 clone_dataset(store, key, new)
             else:
                 method(store, key, new, pars)
+
+
+def clone_group(store, key, new):
+    """
+    """
+    grp = new.create_group(name=key)
+    for k in store[key].keys():
+        if type(store[key][k]) is h5py.Group:
+            clone_group(store[key], k, grp)
+
+        if type(store[key]) is h5py.Dataset:
+            clone_dataset(store[key], k, grp)
 
 
 def clone_dataset(store, key, new):
@@ -289,6 +336,30 @@ def stationary(store, new, chunk=512, eps=1e-8, C=1., div=1., exclude=[None]):
     """
     pars = (chunk, eps, C, div)
     apply_to_store(store, new, _stationary, pars, exclude=exclude)
+
+
+def pyramid(store, new, chunk=512, schema="laplace", params=[3], exclude=[None]):
+    """Generate a new store _new_ from _store_ by
+    building a pyramid of type _schema_ with depth _depth_.
+    """
+    pars = (chunk, schema, params)
+    apply_to_store(store, new, _pyramid, pars, exclude=exclude)
+
+
+def pyramid_fuse(store, new, chunk=512, schema="laplace", depth=(), exclude=[None]):
+    """Generate a new store _new_ from _store_ by
+    building a pyramid of type _schema_ with depth _depth_.
+    """
+    pars = (chunk, schema, depth)
+    apply_to_store(store, new, _pyramid_fuse, pars, exclude=exclude)
+
+
+def double(store, new, chunk=512, exclude=[None]):
+    """Generate a new store _new_ from _store_ by
+    doubling every entry.
+    """
+    pars = (chunk,)
+    apply_to_store(store, new, _double, pars, exclude=exclude)
 
 
 def row0(store, new, chunk=512, exclude=[None]):
@@ -376,7 +447,8 @@ def fuse(store, new, groups, labels, stride=2, exclude=[None]):
         for j, g in enumerate(groups):
             inputs[base+j*stride:base+(j+1)*stride, :] = store[g][stride*i:stride*(i+1),:]
             targets[base+j*stride:base+(j+1)*stride] = labels[j]
-
+    for attrs in store[groups[0]].attrs:
+        inputs.attrs[attrs] = store[groups[0]].attrs[attrs]
 
 def merge(store1, store2, new, stride=4, exclude=[None]):
     """
@@ -424,6 +496,7 @@ def global_div(store, new, chunk, div, exclude=[None]):
     apply_to_store(store, new, _global_div, pars, exclude=exclude)
 
 
+<<<<<<< HEAD
 def blockify(store, new, xs, block, chunk=512, exclude=[None]):
     '''
     2D case
@@ -434,6 +507,15 @@ def blockify(store, new, xs, block, chunk=512, exclude=[None]):
     '''
     pars = (chunk, xs, block)
     apply_to_store(store, new, _blockify, pars, exclude=exclude)
+=======
+def concat(store, new, chunk, grp):
+    """
+    Concatenate all datasets below group grp into one dataset ->
+    substitute group grp by a dataset.
+    """
+    pars = (chunk,)
+    apply_to_group(store, new, _concat, pars, grp)
+>>>>>>> upstream/master
 
 
 def _binary_inv(store, key, new, chunk):
@@ -657,6 +739,205 @@ def _stationary(store, key, new, pars):
     new.attrs['StationaryC'] = C
 
 
+def _gaussian2d(width, sigma):
+    """
+    Gaussian filter of total width _width_.
+    """
+    d, r = divmod(width, 2)
+    r = 1 if r==0 else 0
+    const = -2*sigma**2
+    grid = np.arange(-d + 0.5*r, d+1 - 0.5*r, 1)
+    grid = np.exp((grid**2)/const)
+    gridT = grid.reshape(grid.size, 1)
+    result = gridT*grid
+    return np.asarray(result/np.sum(result))
+
+
+def _lcn_filters(fmaps, depth, width, sigma):
+    """
+    """
+    import theano
+
+    filters = np.zeros((fmaps, fmaps, width, width), dtype=theano.config.floatX)
+    d2 = depth//2
+    for i in xrange(fmaps):
+        for j in xrange(i-d2, i+d2+1):
+            if (j >= 0) and (j <fmaps):
+                filters[i, j, :, :] = _gaussian2d(width, sigma)
+        fi_sum = np.sum(filters[i])
+        filters[i] /= fi_sum
+    return filters
+
+
+def _lcn(image, im_shape, fmaps, pool_depth, width, sigma):
+    """
+    """
+    import theano
+    import theano.tensor as T
+    from theano.tensor.nnet import conv
+
+    border = width//2
+    filters = _lcn_filters(fmaps, pool_depth, width, sigma) 
+    filter_shape = filters.shape
+    blurred_mean = conv.conv2d(input=image, filters=filters, 
+            image_shape=im_shape, filter_shape=filter_shape,
+            border_mode='full')
+    image -= blurred_mean[:, :, border:-border, border:-border]
+    
+    image_sqr = T.sqr(image)
+    blurred_sqr = conv.conv2d(input=image_sqr, filters=filters, 
+            image_shape=im_shape, filter_shape=filter_shape,
+            border_mode='full')
+
+    div = T.sqrt(blurred_sqr[:, :, border:-border, border:-border])
+    fm_mean = div.mean(axis=[2, 3])
+    div = T.largest(fm_mean.dimshuffle(0, 1, 'x', 'x'), div) + 1e-6
+    image = image/div
+    return T.cast(image, theano.config.floatX)
+
+
+def _build_lcns(shape, depth, width, sigma):
+    """
+    Build _depth_ many local contrast normalizer
+    for usage in a pyramid.
+    """
+    import theano
+    import theano.tensor as T
+    print "[HELPERS] lcn with depth {0}, width {1}, sigma {2}".format(depth, width, sigma)
+    lcns = []
+    for i in xrange(depth):
+        x = T.matrix("x{0}".format(i))
+        x = x.reshape((1, 1, shape[0], shape[1]))
+        lcned = _lcn(x, (1, 1, shape[0], shape[1]), fmaps=1, pool_depth=1, width=width, sigma=sigma)
+        lcns.append(theano.function([x], lcned, allow_input_downcast=True))
+        shape = (shape[0]//2, shape[1]//2)
+    print "[HELPERS] lcn done."
+    return lcns
+
+
+def _pyramid(store, key, new, pars):
+    """Pyramid store.
+
+    """
+    # this needs the cv module from osdf.
+    chunk, schema, params = pars[0], pars[1], pars[2]
+
+    depth = 0
+    if schema is "laplace":
+        from osdfcv.pyramid.laplacian import build_pil
+        build_pyr = build_pil
+        depth = params[0]
+    elif schema is "lcn":
+        from osdfcv.pyramid.lcn import build_pil
+        depth, width, sigma = params
+        shape = store[key].shape
+        dx = int(np.sqrt(shape[1]))
+        shape = (dx, dx)
+        lcns = _build_lcns(shape, depth, width, sigma)
+        from functools import partial
+        build_pyr = partial(build_pil, lcns=lcns)
+    elif schema is "fovea":
+        from osdfcv.pyramid.fovea import build
+        depth = params[0]
+        build_pyr = build
+    else:
+        assert False, "Don't know pyramid schmema %s"%schema
+
+    assert depth > 0, "Need a decent depth: %d"%depth
+
+    # collect inputs in group
+    grp = new.create_group(name=key)
+    dsets = []
+    dtype = store[key].dtype
+    shape = store[key].shape
+    dx = int(np.sqrt(shape[1]))
+    for d in xrange(depth):
+        dsets.append(grp.create_dataset(name=key+str(d), shape=shape, dtype=dtype))
+        shape = (shape[0], shape[1]/4)
+
+    k = 0 # global counter, not nice
+    for i in xrange(0, store[key].shape[0], chunk):
+        for l in store[key][i:i+chunk]:
+            pyramid = build_pyr(l.reshape(dx, dx), depth)
+            for j, img in enumerate(pyramid):
+                dsets[j][k] = img.ravel()
+            k = k + 1
+
+    for attrs in store.attrs:
+        grp.attrs[attrs] = store.attrs[attrs]
+    for d in xrange(depth):
+        dsets[d].attrs["patch_shape"] = (dx, dx)
+        dx = dx/2
+    grp.attrs['depth'] = depth
+    grp.attrs['schema'] = schema
+
+
+def _pyramid_fuse(store, key, new, pars):
+    """Pyramid store. All stages of a pyramid
+    fused into one row vector.
+
+    """
+    # this needs the cv module from osdf.
+    chunk, schema, shapes = pars[0], pars[1], pars[2]
+    depth = len(shapes)
+
+    if schema is "laplace":
+        from osdfcv.pyramid.laplacian import build_pil
+
+    dtype = store[key].dtype
+    n, x = store[key].shape
+    dx = int(np.sqrt(x))
+    shape = 0
+    for sh in shapes:
+        shape = shape + sh[0]*sh[1]
+    dset = new.create_dataset(name=key+"_pyr", shape=(n, shape), dtype=dtype)
+
+    k = 0 # global counter, not nice
+    for i in xrange(0, store[key].shape[0], chunk):
+        for l in store[key][i:i+chunk]:
+            pyramid = build_pil(l.reshape(dx, dx), depth)
+            start = 0
+            for j, img in enumerate(pyramid):
+                stop = start + shapes[j][0]*shapes[j][1]
+                dset[k][start:stop] = img.ravel()
+                print dset[k]
+                start = stop
+            k = k + 1
+            print k
+
+    for attrs in store.attrs:
+        new.attrs[attrs] = store.attrs[attrs]
+    new.attrs['depth'] = depth
+    new.attrs['schema'] = schema
+
+
+def _concat(store, key, new, pars):
+    """
+    """
+    chunk = pars[0]
+
+    n = 0
+    _tmp = []
+    dsets = []
+    d = 0
+    for ds in store[key]:
+        dsets.append(store[key][ds])
+        d = d + store[key][ds].shape[1]
+
+    n = dsets[0].shape[0]
+    for ds in dsets[1:]:
+        assert n == ds.shape[0], "Concatenate needs same number samples for all datasets."
+
+    dset = new.create_dataset(name=key, shape=(n, d), dtype=dsets[0].dtype)
+
+    for i in xrange(0, n, chunk):
+        j = 0
+        for ds in dsets:
+            jj = ds.shape[1]
+            dset[i:i+chunk, j:j+jj] = ds[i:i+chunk]
+            j = j + jj
+
+
 def _divisive(store, key, new, pars):
     """Divide by row-norm, possibly scale.
 
@@ -786,6 +1067,7 @@ def _floatify(store, key, float_store, pars):
         dset.attrs[attrs] = store[key].attrs[attrs]
 
 
+<<<<<<< HEAD
 def _binary(store, key, new, chunk=512):
     """convert to binary
     """
@@ -909,6 +1191,19 @@ def convert_spatial_dataset(store, key, new, spatial_n):
         for k in xrange(spatial_n-1):
             value += store[key][i:i+chunk, new_shape[1]*(k+1):new_shape[1]*(k+2)]
         dset[i:i+chunk] = value
+=======
+def _double(store, key, new, pars):
+    """New store is simply every row twice next to each other
+    """
+    chunk = pars[0]
+
+    shape = store[key].shape
+    dset = new.create_dataset(name=key, shape=(shape[0], 2*shape[1]), dtype=store[key].dtype)
+
+    for i in xrange(0, store[key].shape[0], chunk):
+        dset[i:i+chunk, :shape[1]] = store[key][i:i+chunk]
+        dset[i:i+chunk, shape[1]:] = store[key][i:i+chunk]
+>>>>>>> upstream/master
 
     for attrs in store[key].attrs:
         dset.attrs[attrs] = store[key].attrs[attrs]

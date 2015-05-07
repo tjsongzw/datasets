@@ -17,6 +17,8 @@ from os.path import dirname, join, exists
 import hashlib
 import numpy as np
 import h5py
+import scipy.ndimage as simg
+
 
 try:
     import Image as img
@@ -44,10 +46,10 @@ _default_path = dirname(__file__)
 _default_pairings = (500, 1000, 2500, 5000, 10000, 25000)
 
 
-def get_store(fname="patchdata_64x64.h5", path=_default_path, verbose=True):
+def get_store(fname="patchdata_64x64.h5", path=_default_path, verbose=True, access='r'):
     if verbose:
         print "Loading from store", fname
-    return h5py.File(join(path, fname), 'r')
+    return h5py.File(join(path, fname), access)
 
 
 def build_store(fname="patchdata_64x64.h5", path=_default_path, dataset=dataset):
@@ -63,7 +65,7 @@ def build_store(fname="patchdata_64x64.h5", path=_default_path, dataset=dataset)
             bmp = join(ds_path, ''.join(["patches", str(i).zfill(4), ".bmp"]))
             dset[i*per_bmp:(i+1)*per_bmp] = _crop_to_numpy(bmp)
         if mod > 0:
-            bmp = join(ds_path, ''.join(["patches", str(bmps).zfill(4), ".bmp"])) 
+            bmp = join(ds_path, ''.join(["patches", str(bmps).zfill(4), ".bmp"]))
             dset[-(totals%per_bmp):] = _crop_to_numpy(bmp)[:mod]
     f.attrs["dataset"] = dataset
     f.attrs["patch_shape"] = (patch_y, patch_x)
@@ -71,14 +73,14 @@ def build_store(fname="patchdata_64x64.h5", path=_default_path, dataset=dataset)
     print "Wrote", dataset, "to", fname, f
 
 
-def build_evaluate_store(store, pair_list=_default_pairings, path=_default_path, tag=None):
+def build_evaluate_store(store, dataset=dataset, pair_list=_default_pairings, path=_default_path, tag=None):
     """Put matching/non-matching pairs into a hdf5.
 
-    There is one hdf5 per dataset, with the available number of pairs 
-    in _pair_list_. These numbers form the groups of every store. 
-    The store is using the original patches, scaled versions of 
+    There is one hdf5 per dataset, with the available number of pairs
+    in _pair_list_. These numbers form the groups of every store.
+    The store is using the original patches, scaled versions of
     these patches should be generated with resize.
-    
+
     Every group has two datasets, 'match' and 'non-match',
     both arrays of equal length, the original pairs are formed by
     blocks of consecutive rows.
@@ -87,14 +89,24 @@ def build_evaluate_store(store, pair_list=_default_pairings, path=_default_path,
     later evaluation (avoid costly rebuilding everyting into float64).
     For this reason, reconsider when 'extending' pair_list into the 100.000
     range.
+
+    Usage:
+    >>> # build evaluate stores of the size used in publications
+    >>> # (i.e. 50000 pairs).
+    >>> store = ds.get_store()
+    >>> ds.build_evaluate_store(store, pair_list=(50000,))
+    >>> # possibly, rename these evaluation stores.
+    >>> # possibly, symbolic link to these evaluation stores.
+    >>> # possibly, these evaluation stores need more processing
+    >>> # -> save processed data in this folder and symbolic link to here.
     """
     if tag is None:
         tag = ""
     else:
         tag = "".join([tag, "_"])
     for ds in dataset:
-        fname = "".join([tag, "evaluate_", ds, "_", "64x64.h5"])
-        print "\nBuilding evaluate store", fname, "for", pair_list
+        fname = "{0}evaluate_{1}_64x64.h5".format(tag, ds)
+        print "\nBuilding evaluate store {0} for {1}".format(fname, pair_list)
         f = h5py.File(join(path, fname), "w")
         for pairs in pair_list:
             grp = f.create_group(name=str(pairs))
@@ -105,6 +117,136 @@ def build_evaluate_store(store, pair_list=_default_pairings, path=_default_path,
         f.attrs["patch_shape"] = (patch_y, patch_x)
         f.attrs["pairs"] = pair_list
         f.close()
+
+
+def build_supervised_store(dataset=dataset, sz=250000, pairings=True):
+    """Helper function for building a (flat) store for supervised training
+    on 'dataset'. It has _sz_ many pairs of matches and _sz_ many pairs
+    of non-matches. If _pairings_ is True, first build the split match/non-match
+    base hdf5 for _dataset_.
+    Usage:
+    >>> # build stores for supervised (e.g. DrLim CNNs) with largest canoncial
+    >>> # size of pairs. Note: This has pairings set to True, so quite some
+    >>> # intermediate ('supervised_250000_...') hdf5 stores will be built -> delete
+    >>> store = ds.get_store()
+    >>> ds.build_supervised_store()
+    """
+    print "Building supervised flat store for {0}, pairs per site {1}".format(dataset, sz)
+
+    if pairings:
+        print "Building non-flat base store first."
+        store = get_store()
+        tag = "supervised_{0}".format(sz)
+        if type(dataset) is str:
+            dataset = [dataset]
+        build_evaluate_store(store, dataset=dataset, pair_list=[sz], tag=tag)
+        store.close()
+
+    fsd = []
+    for ds in dataset:
+        fname = "supervised_{0}_evaluate_{1}_64x64.h5".format(sz, ds)
+        # fuse this store
+        store = get_store(fname)
+        fname = "supervised_{0}_evaluate_{1}_fuse_64x64.h5".format(sz, ds)
+        fused = fuse_store(store, str(sz), fname=fname)
+        fsd.append(fused)
+    print "Remember to close stores in returned list!", fsd
+    print "Probably remove unnececssary intermediate stores."
+    return fsd
+
+
+def build_resize_stores(shape, dset=dataset, evaluate=True, supervised=True,
+        sz=250000, selecting=True, samples=400000):
+    """Helper function for building resized datastores: Resize all
+    standard evaluation stores, resize (if wanted) the fused (flat)
+    store for supervised training on 'dataset'. If _select_ is set,
+    select _samples_ many random samples from _dataset_ and resize.
+    Usage:
+    >>> ds.build_resized_store()
+    """
+    print "Building resized store for {0} with new shape {1}x{2}".format(dataset, shape, shape)
+
+    if evaluate:
+        print "\nBuilding resized store for all evaluates"
+        for ds in dataset:
+            fname = "supervised_50000_evaluate_{0}_64x64.h5".format(ds)
+            store = get_store(fname)
+            # resized evaluates
+            fname = "supervised_50000_evaluate_{0}_{1}x{2}.h5".format(ds, shape, shape)
+            eval_rszd = resize_store(store, (shape, shape), cache=True, name=fname)
+            store.close()
+            eval_rszd.close()
+            print
+    
+    if selecting:
+        print "\n\nSelecting stores from {0}.".format(dset)
+        patches = get_store()
+        for ds in dset:
+            idx_st = (samples, 10000)
+            name = "{0}_{1}.select.h5".format(ds, samples)
+            selection = select(patches, dataset=[ds], index_set=[idx_st], cache=True, name=name)
+            print
+            name = "{0}_{1}_{2}x{3}.select.h5".format(ds, samples, shape, shape)
+            rszd = resize_store(selection, (shape, shape), cache=True, name=name)
+            selection.close()
+        patches.close()
+
+    if supervised:
+        print "\n\nResizing fused stores for {0}.".format(dset)
+        for ds in dset:
+            fname = "supervised_{0}_evaluate_{1}_fuse_64x64.h5".format(sz, ds)
+            # fuse this store
+            store = get_store(fname)
+            fname = "supervised_{0}_evaluate_{1}_fuse_{2}x{3}.h5".format(sz, ds, shape, shape)
+            eval_rszd = resize_store(store, (shape, shape), cache=True, exclude=["targets"], name=fname)
+            store.close()
+            eval_rszd.close()
+    print "Probably remove unnececssary intermediate stores."
+
+
+def build_supervised_scale_store(dataset, sz, scale="laplace", depth=3, fused=None):
+    """Helper function for building a (flat) store for supervised training
+    on 'dataset' with scale information. It has _sz_ many pairs of matches and _sz_ many pairs
+    of non-matches.
+    """
+    print "Building store for scale {0}, with {1} scales".format(scale, depth)
+
+    if fused is None:
+        print "Need to build scaled store first. This takes time ..."
+        fused = build_supervised_store(dataset, sz)
+
+    if type(fused) is not list:
+        fused = [fused]
+    
+    scaled = []
+    for fsd in fused:
+        scale_st = pyramid_store(fsd, schema=scale, params=[depth], 
+                exclude=['targets'])
+        scaled.append(scale_st)
+    print "Remember to close stores in returned list!", scaled
+    return scaled
+
+
+def build_supervised_merge_store(mergers, sz):
+    """
+    Merge two _fused_stores into one large store.
+
+    >>> ds.build_supervised_merge_store(["notredame", "liberty"], 250000)
+    >>> ds.build_supervised_merge_store(["notredame", "yosemite"], 250000)
+    >>> ds.build_supervised_merge_store(["liberty", "yosemite"], 250000)
+    """
+    print "Building supervised flat merge store for {0}, pairs per mergers {1}".format(mergers, sz)
+
+    s1 = "supervised_{0}_evaluate_{1}_fuse_64x64.h5".format(sz, mergers[0])
+    s1 = get_store(s1)
+
+    s2 = "supervised_{0}_evaluate_{1}_fuse_64x64.h5".format(sz, mergers[1])
+    s2 = get_store(s2)
+    
+    mergers = "{0}+{1}".format(mergers[0], mergers[1])
+    fname = "supervised_{0}_evaluate_{1}_fuse_64x64.h5".format(2*sz, mergers)
+    merged = merge_store(s1, s2, cache=True, fname=fname)
+    merged.close()
 
 
 def info(dataset=dataset):
@@ -129,7 +271,7 @@ def info(dataset=dataset):
 
 
 def select(store, dataset=dataset, index_set=[(512, 32), (512, 32), (512, 32)],
-        chunk=512, cache=True, dim=patch_x*patch_y):
+        chunk=512, cache=True, dim=patch_x*patch_y, name=None, verbose=True):
     """Select from the _dataset_s in _store_ some patches, specified by _index_set_.
 
     A _store_ has the three subsets ["liberty", "notredame", "yosemite"].
@@ -146,11 +288,14 @@ def select(store, dataset=dataset, index_set=[(512, 32), (512, 32), (512, 32)],
     random.seed()
 
     assert len(dataset) == len(index_set), "Every dataset needs its indices"
-
-    name = hashlib.sha1(str(store.attrs["patch_shape"]) + str(dataset) + str(index_set))
-    name = name.hexdigest()[:8] + ".select.h5"
+    if name is None:
+        print "Generating store name by hashing."
+        name = hashlib.sha1(str(store.attrs["patch_shape"]) + str(dataset) + str(index_set))
+        name = name.hexdigest()[:8] + ".select.h5"
+    else:
+        print "Store name is given:", name
     if cache is True and exists(name):
-        print "Using cached version ", name
+        if verbose: print "Using cached version ", name
         return h5py.File(name, 'r+')
 
     select = h5py.File(name, 'w')
@@ -187,7 +332,7 @@ def select(store, dataset=dataset, index_set=[(512, 32), (512, 32), (512, 32)],
         jt = _fill_up(store[d], train, indices=rt, pos=jt, chunk=chunk)
         jv = _fill_up(store[d], valid, indices=rv, pos=jv, chunk=chunk)
     select.attrs["Original"] = "from " + str(store.filename)
-    #helpers.shuffle(select)
+    helpers.shuffle(select)
     return select
 
 
@@ -329,14 +474,18 @@ def crop_store(store, x, y, dx, dy, cache=False, verbose=True):
     return crop
 
 
-def stationary_store(store, eps=1e-8, C=1., div=1., chunk=512, cache=False, exclude=[None], verbose=True):
+def stationary_store(store, eps=1e-8, C=1., div=1., chunk=512, cache=False,
+        exclude=[None], verbose=True, fname=None):
     """A new store that contains stationary images from _store_.
     """
     if verbose:
-        print "Stationarize store", store, "with eps, C, div" , eps, C, div
-    sfn = store.filename.split(".")[0]
-    name = hashlib.sha1(sfn + str(C) + str(eps) + str(chunk))
-    name = name.hexdigest()[:8] + ".stat.h5"
+        print "Stationarize store", store, "with eps, C, div" , eps, C, div, fname
+    if fname is None:
+        sfn = store.filename.split(".")[0]
+        name = hashlib.sha1(sfn + str(C) + str(eps) + str(chunk))
+        name = name.hexdigest()[:8] + ".stat.h5"
+    else:
+        name = fname
     if cache is True and exists(name):
         print "Using cached version ", name
         return h5py.File(name, 'r+')
@@ -348,15 +497,19 @@ def stationary_store(store, eps=1e-8, C=1., div=1., chunk=512, cache=False, excl
     return stat
 
 
-def fuse_store(store, key, groups=["match", "non-match"], labels=[1,0], stride=2, cache=False):
+def fuse_store(store, key, groups=["match", "non-match"], labels=[1,0], 
+        stride=2, cache=False, fname=None):
     """
     A new store that fuses images from 'match'/'non-match' parts
     into one main store.
     """
     print "Fuse store", store, ", key", str(key)
-    sfn = store.filename.split(".")[0]
-    name = hashlib.sha1(sfn + str(groups) + str(stride))
-    name = name.hexdigest()[:8] + ".fuse.h5"
+    if fname is None:
+        sfn = store.filename.split(".")[0]
+        name = hashlib.sha1(sfn + str(groups) + str(stride))
+        name = name.hexdigest()[:8] + ".fuse.h5"
+    else:
+        name = fname
     if cache is True and exists(name):
         print "Using cached version ", name
         return h5py.File(name, 'r+')
@@ -368,7 +521,8 @@ def fuse_store(store, key, groups=["match", "non-match"], labels=[1,0], stride=2
     return fuse
 
 
-def merge_store(store1, store2, stride=4, cache=False):
+def merge_store(store1, store2, stride=4, cache=False, 
+        fname=None):
     """
     A new store that merges images from store1 and store2
     into one main store.
@@ -376,8 +530,11 @@ def merge_store(store1, store2, stride=4, cache=False):
     print "Merge stores", store1, store2
     sfn1 = store1.filename.split(".")[0]
     sfn2 = store2.filename.split(".")[0]
-    name = hashlib.sha1(sfn1 + sfn2 + str(stride))
-    name = name.hexdigest()[:8] + ".merge.h5"
+    if fname is None:
+        name = hashlib.sha1(sfn1 + sfn2 + str(stride))
+        name = name.hexdigest()[:8] + ".merge.h5"
+    else:
+        name = fname
     if cache is True and exists(name):
         print "Using cached version ", name
         return h5py.File(name, 'r+')
@@ -387,6 +544,25 @@ def merge_store(store1, store2, stride=4, cache=False):
     helpers.merge(store1, store2, merge, stride=stride)
     merge.attrs["Merged"] = "from " + sfn1 + ", " + sfn2
     return merge
+
+
+def concat_store(store, group, chunk=512, cache=False, exclude=[None], verbose=True):
+    """A new store that contains stationary images from _store_.
+    """
+    if verbose:
+        print "Concatenate store", store, "with group", group 
+    sfn = store.filename.split(".")[0]
+    name = hashlib.sha1(sfn + str(group) + str(chunk))
+    name = name.hexdigest()[:8] + ".concat.h5"
+    if cache is True and exists(name):
+        print "Using cached version ", name
+        return h5py.File(name, 'r+')
+
+    print "No cache, writing to", name
+    conc = h5py.File(name, 'w')
+    helpers.concat(store, conc, chunk=chunk, grp=group)
+    conc.attrs["Concatenated"] = "from " + str(store.filename)
+    return conc
 
 
 def row0_store(store, chunk=512, cache=False, verbose=True):
@@ -409,7 +585,7 @@ def row0_store(store, chunk=512, cache=False, verbose=True):
     return r0 
 
 
-def feat0_store(store, to_sub, chunk=512, cache=False):
+def feat0_store(store, to_sub, chunk=512, exclude=[None], cache=False):
     """A new store that is featurewise 0-mean.
     """
     print "Feat0 store", store
@@ -422,12 +598,12 @@ def feat0_store(store, to_sub, chunk=512, cache=False):
 
     print "No cache, writing to", name
     f0 = h5py.File(name, 'w')
-    helpers.feat_sub(store, f0, chunk=chunk, sub=to_sub)
+    helpers.feat_sub(store, f0, chunk=chunk, sub=to_sub, exclude=exclude)
     f0.attrs["Feat0"] = "from " + str(store.filename)
     return f0 
 
 
-def feat_std1_store(store, to_div, chunk=512, cache=False):
+def feat_std1_store(store, to_div, chunk=512, exclude=[None], cache=False):
     """
     New store has standard deviation 1 per feature.
     """
@@ -441,12 +617,12 @@ def feat_std1_store(store, to_div, chunk=512, cache=False):
 
     print "No cache, writing to", name
     fstd1 = h5py.File(name, 'w')
-    helpers.feat_div(store, fstd1, chunk=chunk, div=to_div)
+    helpers.feat_div(store, fstd1, chunk=chunk, div=to_div, exclude=exclude)
     fstd1.attrs["Feat_std1"] = "from " + str(store.filename)
     return fstd1
 
 
-def gstd1_store(store, to_div, chunk=512, cache=False, verbose=True):
+def gstd1_store(store, to_div, chunk=512, exclude=[None], cache=False, verbose=True):
     """A new store that has global std = 1.
     """
     if verbose:
@@ -465,25 +641,49 @@ def gstd1_store(store, to_div, chunk=512, cache=False, verbose=True):
     return std
 
 
-def resize_store(store, shape, cache=False, verbose=True):
+def double_store(store, chunk=512, cache=False, exclude=[None], verbose=True):
+    """A new store that contains stationary images from _store_.
+    """
+    if verbose:
+        print "Double store", store, "excluding ", exclude
+    sfn = store.filename.split(".")[0]
+    name = hashlib.sha1(sfn + str(exclude) + str(chunk))
+    name = name.hexdigest()[:8] + ".double.h5"
+    if cache is True and exists(name):
+        print "Using cached version ", name
+        return h5py.File(name, 'r+')
+
+    print "No cache, writing to", name
+    stat = h5py.File(name, 'w')
+    helpers.double(store, stat, chunk=chunk, exclude=exclude)
+    stat.attrs["Double"] = "from " + str(store.filename)
+    return stat
+
+
+def resize_store(store, shape, cache=False, exclude=[None], verbose=True, name=None):
     """A new store that contains resized images from _store_.
     """
     if verbose:
         print "Resizing store", store, "to new shape", shape
-    sfn = store.filename.split(".")[0]
-    name = hashlib.sha1(sfn + str(shape))
-    name = name.hexdigest()[:8] + ".resz.h5"
+    if name is None:
+        print "Generating store name by hashing."
+        sfn = store.filename.split(".")[0]
+        name = hashlib.sha1(sfn + str(shape))
+        name = name.hexdigest()[:8] + ".resz.h5"
+    else:
+        print "Store name is given:", name
     if cache is True and exists(name):
         if verbose: print "Using cached version ", name
         return h5py.File(name, 'r+')
 
     print "No cache, writing to", name
     rsz = h5py.File(name, 'w')
-    helpers.resize(store, rsz, shape)
+    helpers.resize(store, rsz, shape, exclude=exclude)
     rsz.attrs["Resized"] = "from " + str(store.filename)
     return rsz
 
-def fward_store(store, fward, D, chunk=512, cache=False, verbose=True):
+
+def fward_store(store, fward, D, chunk=512, cache=False, exclude=[None], verbose=True):
     """
     """
     if verbose:
@@ -503,7 +703,7 @@ def fward_store(store, fward, D, chunk=512, cache=False, verbose=True):
     return fw
 
 
-def at_store(store, M, chunk=512, cache=False, verbose=True):
+def at_store(store, M, chunk=512, cache=False, exclude=[None], verbose=True):
     """
     """
     if verbose:
@@ -517,7 +717,7 @@ def at_store(store, M, chunk=512, cache=False, verbose=True):
 
     print "No cache, writing to", name
     at = h5py.File(name, 'w')
-    helpers.at(store, at, M, chunk=chunk)
+    helpers.at(store, at, M, chunk=chunk, exclude=exclude)
     at.attrs["AT"] = "from " + str(store.filename)
     return at
 
@@ -558,6 +758,58 @@ def zeroone_group(store, chunk=512, group=["match", "non-match"], cache=False):
     helpers.zeroone_group(store, zo, group=group, chunk=chunk)
     zo.attrs["ZO_GRP"] = "from " + str(store.filename)
     return zo 
+
+
+def pyramid_store(store, schema="laplace", params=[3], chunk=512, cache=False, 
+        exclude=[None], verbose=True, fname=None):
+    """A new store that contains pyramid images from _store_.
+    """
+    if verbose:
+        print "Pyramid store", store, "with params (depth is first!), schema:", params, params[0], schema
+    
+    if schema == "laplace":
+        ending = ".lapy.h5"
+    elif schema == "lcn":
+        ending = ".lcnpy.h5"
+    elif schema == "fovea":
+        ending = ".fovpy.h5"
+    else:
+        assert False, "Unkown pyramid schema %s"%schema
+
+    if fname is None:
+        sfn = store.filename.split(".")[0]
+        name = hashlib.sha1(sfn + str(schema) + str(params) + str(chunk))
+        name = name.hexdigest()[:8] + ending
+    else:
+        name = fname
+    if cache is True and exists(name):
+        print "Using cached version ", name
+        return h5py.File(name, 'r+')
+
+    print "No cache, writing to", name
+    pyr = h5py.File(name, 'w')
+    helpers.pyramid(store, pyr, chunk=chunk, schema=schema, params=params, exclude=exclude)
+    pyr.attrs["Pyramid"] = "from " + str(store.filename)
+    return pyr
+
+
+def pyramidfuse_store(store, schema="laplace", depth=(), chunk=512, cache=False, exclude=[None], verbose=True):
+    """A new store that contains pyramid images from _store_.
+    """
+    if verbose:
+        print "Pyramid Fuse store", store, "with depth, schema:", depth, schema
+    sfn = store.filename.split(".")[0]
+    name = hashlib.sha1(sfn + str(schema) + str(depth) + str(chunk))
+    name = name.hexdigest()[:8] + ".lapyfuse.h5"
+    if cache is True and exists(name):
+        print "Using cached version ", name
+        return h5py.File(name, 'r+')
+
+    print "No cache, writing to", name
+    pyr = h5py.File(name, 'w')
+    helpers.pyramid_fuse(store, pyr, chunk=chunk, schema=schema, depth=depth, exclude=exclude)
+    pyr.attrs["PyramidFused"] = "from " + str(store.filename)
+    return pyr
 
 
 def _crop_to_numpy(patchfile, ravel=True):
@@ -627,60 +879,212 @@ def _patches_from_pair(pair, store):
     return store[pair[0],:], store[pair[1],:]
 
 
-def perturb_patches(patches, newshape, box, nop=False):
+def build_phantom_store(store, dataset, index_set, nmbrs,
+        deltax, deltay, scale, rot, dimx, dimy,
+        path=_default_path, nonmatch=False, label=False, tag=None):
     """
-    Generate random perturbations. Assume that patches
-    come in pairs.
     """
+    if nonmatch and label:
+        assert False, "Negative pairing AND classes is not possible."
+
+    print "Building phantom store out of {0}".format(dataset)
+    total = 0
+    for idx in index_set:
+        total = total+idx[0]
+    total = total*nmbrs
+
+    if tag is None:
+        tag = ""
+    else:
+        tag = "".join([tag, "_"])
+    fname = "".join(["phantom_", tag, str(total), '-', str(nmbrs), "_", "{0}x{1}.h5".format(dimx, dimy)])
+    f = h5py.File(join(path, fname), "w")
+    print "Writing phantom data to", f
+
+    sel = select(store, dataset=dataset, index_set=index_set, cache=False)
+    grp = f.create_group(name="train")
+    grp.attrs["patch_shape"] = sel.attrs["patch_shape"]
+
+    if nonmatch:
+        print "Positive and negative pairs -- positive dataset is named 'match'."
+        mtch_name = "match"
+    else:
+        print "Only positive pairs -- dataset is named 'inputs'."
+        mtch_name = "inputs"
+
+    # positive pair set is built always
+    shape = sel['train']['inputs'].shape
+
+    if label:
+        print "Building classes -- # of classes is {0}.".format(shape[0])
+        train = grp.create_dataset(name=mtch_name,
+                shape=(shape[0]*nmbrs, dimx*dimy), dtype=np.float32)
+        trgt = grp.create_dataset(name='targets', shape=(shape[0]*nmbrs,),
+            dtype=np.int32)
+        cur_class = 0
+    else:
+        train = grp.create_dataset(name=mtch_name,
+                shape=(2*shape[0]*nmbrs, dimx*dimy), dtype=np.float32)
+
+    i = 0
+    for elem in sel['train']['inputs']:
+        x = elem.reshape(patch_x, patch_y)
+        ph = phantom(x, nmbrs, deltax, deltay, scale, rot, dimx, dimy)
+        # get inner original patch of x
+        ox, oy = x.shape[0]//2, x.shape[1]//2
+        xmin, xmax = ox - dimx//2, ox + dimx//2
+        ymin, ymax = oy - dimy//2, oy + dimy//2
+        tmp = x[xmin:xmax, ymin:ymax]
+        tmp = tmp.ravel()
+        if label:
+            for j, p in enumerate(ph):
+                train[i+j, :] = p
+                trgt[i+j] = cur_class
+            cur_class = cur_class + 1
+            i = i + nmbrs
+        else:
+            for j, p in enumerate(ph):
+                train[i+2*j, :] = tmp
+                train[i+2*j+1,:] = p
+            i = i + 2*nmbrs
+    if label:
+        helpers._shuffle_sync(train, trgt)
+    else:
+        helpers._shuffle_pairs(train)
+    sel.close()
+    
+    if nonmatch:
+        print "Building negative pairs with a new selection store."
+        sel = select(store, dataset=dataset, index_set=index_set, cache=False)
+        shape = sel['train']['inputs'].shape
+        train = grp.create_dataset(name="non-match", shape=(2*shape[0]*nmbrs, dimx*dimy),
+                dtype=np.float32)
+        _nmbrs = int(np.sqrt(nmbrs))
+        assert _nmbrs**2 == nmbrs, "For negative matches, need a valid number of pairings."
+
+        i = 0
+        for elem in sel['train']['inputs']:
+            x = elem.reshape(patch_x, patch_y)
+            ph1 = phantom(x, _nmbrs, deltax, deltay, scale, rot=180, dimx=dimx, dimy=dimy)
+            rnds = np.random.randint(0, shape[0], size=_nmbrs)
+            for j, p in enumerate(ph1):
+                for k, r in enumerate(rnds):
+                    tmp = sel['train']['inputs'][r]
+                    tmp = tmp.reshape(patch_x, patch_y)
+                    tmp = phantom(tmp, 1, deltax, deltay, scale, rot=180, dimx=dimx, dimy=dimy)
+                    train[i+2*(j*_nmbrs + k),:] = p
+                    train[i+2*(j*_nmbrs + k)+1,:] = tmp[0]
+            i = i + 2*nmbrs
+        helpers._shuffle_pairs(train)
+        sel.close()
+        print "You need to fuse mtch and non-mtch pairs into one dataset!"
+    f.close()
+
+
+def phantom(x, nmbrs, deltax, deltay, scale, rot, dimx, dimy):
+    """Generate _phantoms_ many phantom images of _x_
+    """
+    phantoms = np.zeros((nmbrs, dimx*dimy))
+    for i in xrange(nmbrs):
+        dx = np.random.randint(-deltax, deltax+1)
+        dy = np.random.randint(-deltay, deltay+1)
+        sc = np.random.randint(-scale, scale+1)
+        rt = np.random.randint(-rot, rot+1)
+
+        pic = simg.shift(x, (dy, dx), mode='reflect')
+        pic = simg.rotate(pic, rt, mode='reflect')
+        shape = pic.shape
+        ox, oy = shape[0]//2, shape[1]//2
+        xmin, xmax = ox - 16 + sc//2, ox + 16 - sc//2
+        ymin, ymax = oy - 16 + sc//2, oy + 16 - sc//2
+        pic = pic[xmin:xmax, ymin:ymax]
+        pic = simg.zoom(pic, (1.0*dimx)/(xmax-xmin))
+        phantoms[i, :] = pic.ravel()
+    return phantoms
+
+
+def flip_patches(patches):
+    """
+    Flip patches (either 90 degrees left right, or 180 degrees).
+    Assume that patches come in pairs.
+    """
+    import theano
     n, d = patches.shape
     dx = int(np.sqrt(d))
     tmp = patches.reshape((n, dx, dx))
-    result = np.zeros((n, newshape[0]*newshape[1]))
-    box1 = box
-    box2 = box
+    result = np.zeros((n, d), dtype=theano.config.floatX)
     for j in xrange(n/2):
-        p1 = img.fromarray(tmp[2*j])
-        p2 = img.fromarray(tmp[2*j + 1])
-        
-        if nop:
-            result[2*j, :] = np.asarray(p1.crop(box)).ravel()
-            result[2*j+1,:] = np.asarray(p2.crop(box)).ravel()
-            continue
-
-        rnd = np.random.rand()
-        if rnd < 0.25:
-            pass
-        elif rnd < 0.5:
-            # flip
-            rnd1 = np.random.randn()
+        flips = np.random.rand()
+        if flips < 0.5:
+            # no flipping
+            result[2*j, :] = patches[2*j]
+            result[2*j + 1, :] = patches[2*j + 1]
+        else:
+            p1 = img.fromarray(tmp[2*j])
+            p2 = img.fromarray(tmp[2*j + 1])
+            # determine random flip
+            rnd1 = np.random.rand()
             if rnd1 < 0.33:
                 flip = img.ROTATE_90
             elif rnd1 < 0.66:
                 flip = img.ROTATE_180
             else:
                 flip = img.ROTATE_270
+
             p1 = p1.transpose(flip)
             p2 = p2.transpose(flip)
-        elif rnd < 0.75:
-            rnd = np.random.randn() - 0.5
-            p1 = p1.rotate(3*rnd, resample=img.BICUBIC, expand=False)
-            rnd = np.random.randn() - 0.5
-            p2 = p2.rotate(3*rnd, resample=img.BICUBIC, expand=False)
-        else:
-            diffx = np.random.random_integers(-2, 2)
-            diffy = np.random.random_integers(-2, 2)
-            box1 = (box1[0] + diffx, box1[1] + diffy, box1[2] + diffx, box1[3] + diffy)
-            diffx = np.random.random_integers(-2, 2)
-            diffy = np.random.random_integers(-2, 2)
-            box2 = (box2[0] + diffx, box2[1] + diffy, box2[2] + diffx, box2[3] + diffy)
-        result[2*j, :] = np.asarray(p1.crop(box)).ravel()
-        result[2*j+1,:] = np.asarray(p2.crop(box)).ravel()
-
-    means = np.mean(result, axis=1)
-    result -= np.atleast_2d(means).T
-    norm = np.sqrt(np.sum(result**2, axis=1) + 1e-8)
-    result /= np.atleast_2d(norm).T
+            result[2*j, :] = np.asarray(p1).ravel()
+            result[2*j+1,:] = np.asarray(p2).ravel()
     return result
+
+
+def gauss_patches(patches, sigma=0.1):
+    """
+    Noise one of the two patches with gaussian noise.
+    This could be done more efficiently (matrix * matrix),
+    but I want to make sure that only one of two patches
+    gets noised at most. With this constraint, the for loop
+    seems to be the most straight forward.
+    """
+    n, d = patches.shape
+    result = np.zeros((n, d))
+    for j in xrange(n/2):
+        gaussian = np.random.rand()
+        # only noise at most one image
+        if gaussian < 0.33:
+            # no noise
+            result[2*j, :] = patches[2*j]
+            result[2*j+1, :] = patches[2*j + 1]
+        elif gaussian < 0.66:
+            result[2*j, :] = patches[2*j] + np.random.normal(scale=sigma, size=(d,))
+            result[2*j+1, :] = patches[2*j+1]
+        else:
+            result[2*j, :] = patches[2*j]
+            result[2*j+1, :] = patches[2*j+1] + np.random.normal(scale=sigma, size=(d,))
+    return result
+
+
+def snp_patches(patches, drop):
+    """
+    Bernoulli noise (salt'n pepper) on patches.
+    """
+    n, d = patches.shape
+    result = np.zeros((n, d))
+    for j in xrange(n/2):
+        noise = np.random.rand()
+        # only noise at most one image
+        if noise < 0.33:
+            # no noise
+            result[2*j, :] = patches[2*j]
+            result[2*j+1, :] = patches[2*j + 1]
+        elif noise < 0.66:
+            result[2*j, :] = patches[2*j] * (np.random.uniform(size=(d,)) > drop)
+            result[2*j+1, :] = patches[2*j+1]
+        else:
+            result[2*j, :] = patches[2*j]
+            result[2*j+1, :] = patches[2*j+1] * (np.random.uniform(size=(d,)) > drop)
+    return result
+
 
 if __name__=="__main__":
     build_store()
